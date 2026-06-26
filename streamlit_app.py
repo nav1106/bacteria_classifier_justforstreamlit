@@ -20,6 +20,7 @@ import torch
 from transformers import BertTokenizer, BertModel
 import warnings
 warnings.filterwarnings("ignore")
+import requests
 
 # ─────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -355,7 +356,7 @@ def load_pipeline():
         return pipeline, None
     except Exception as e:
         return None, str(e)
-
+'''
 @st.cache_resource
 def load_proteinbert():
     """Load ProteinBERT tokenizer and model."""
@@ -368,13 +369,13 @@ def load_proteinbert():
         return tokenizer, model, None
     except Exception as e:
         return None, None, str(e)
-
+'''
 # ─────────────────────────────────────────────────────────────────
 # EMBEDDING FUNCTION
 # ─────────────────────────────────────────────────────────────────
 
 VALID_AAS = set("ACDEFGHIKLMNPQRSTVWYBXZUO")
-
+'''
 def get_proteinbert_embedding(sequence, tokenizer, model):
     """Convert a protein sequence to a 1024-dim ProteinBERT embedding."""
     seq   = str(sequence).upper().strip()
@@ -400,7 +401,43 @@ def get_proteinbert_embedding(sequence, tokenizer, model):
     sum_m    = torch.clamp(mask_exp.sum(dim=1), min=1e-9)
     embedding = (sum_e / sum_m).squeeze().numpy()
     return embedding
+'''
+def get_proteinbert_embedding(sequence, hf_token=None):
+    """Fetches the 1024-dim ProtBERT embedding using Hugging Face Serverless API."""
+    API_URL = "https://api-inference.huggingface.co/models/Rostlab/prot_bert"
+    
+    # Use the token from your Streamlit secrets
+    headers = {}
+    if "HF_TOKEN" in st.secrets:
+        headers["Authorization"] = f"Bearer {st.secrets['HF_TOKEN']}"
+    elif hf_token:
+        headers["Authorization"] = f"Bearer {hf_token}"
 
+    # ProtBERT expects spaces between amino acids
+    seq = str(sequence).upper().strip()
+    seq = "".join(aa if aa in VALID_AAS else "X" for aa in seq)
+    seq = seq[:510]
+    seq_spaced = " ".join(list(seq))
+
+    response = requests.post(API_URL, headers=headers, json={"inputs": seq_spaced})
+    
+    if response.status_code == 200:
+        # The inference API returns token embeddings. 
+        # We perform mean pooling across tokens manually on the returned JSON list.
+        token_embeddings = response.json()
+        if isinstance(token_embeddings, list) and len(token_embeddings) > 0:
+            # If it returns a 3D matrix (batch, tokens, hidden_dim)
+            if isinstance(token_embeddings[0], list) and isinstance(token_embeddings[0][0], list):
+                matrix = np.array(token_embeddings[0]) # shape: (tokens, 1024)
+                return np.mean(matrix, axis=0) # mean pool to (1024,)
+            # If it already returns a 2D matrix
+            elif isinstance(token_embeddings[0], list):
+                return np.mean(np.array(token_embeddings), axis=0)
+        raise ValueError("Unexpected response format from Hugging Face API.")
+    elif response.status_code == 503:
+        raise RuntimeError("Hugging Face model is currently loading on their servers. Please wait 20 seconds and try again!")
+    else:
+        raise RuntimeError(f"HF API Error ({response.status_code}): {response.text}")
 # ─────────────────────────────────────────────────────────────────
 # PREDICTION PIPELINE
 # ─────────────────────────────────────────────────────────────────
@@ -681,116 +718,136 @@ if "Predict" in page:
         elif len(seq) < 30:
             st.error("Sequence too short. Please enter at least 30 amino acids.")
         else:
-            with st.spinner("Loading ProteinBERT model (first run may take a minute)..."):
-                tokenizer, bert_model, bert_err = load_proteinbert()
+            progress = st.progress(0, text="Starting pipeline...")
 
-            if bert_err:
-                st.error(f"Could not load ProteinBERT: {bert_err}")
-            else:
-                progress = st.progress(0, text="Starting pipeline...")
+            try:
+                progress.progress(20, text="Requesting ProtBERT embedding from Hugging Face API...")
+                
+                # 1. Fetch embedding via Serverless API (Zero local RAM footprint!)
+                embedding = get_proteinbert_embedding(seq)
+                
+                progress.progress(50, text="Applying PCA transformation...")
+                
+                # 2. Match your feature lengths and align with pipeline
+                n_pca_features = len(pipeline["feature_cols_pca"])
+                if len(embedding) < n_pca_features:
+                    padded = np.zeros(n_pca_features)
+                    padded[:len(embedding)] = embedding
+                    X_input = padded.reshape(1, -1)
+                else:
+                    X_input = embedding[:n_pca_features].reshape(1, -1)
 
-                try:
-                    progress.progress(20, text="Generating ProteinBERT embedding...")
-                    progress.progress(50, text="Applying PCA transformation...")
-                    progress.progress(80, text="Running SVM classifier...")
+                X_scaled   = pipeline["scaler_pca"].transform(X_input)
+                X_pca      = pipeline["pca"].transform(X_scaled)
 
-                    result = predict_sequence(seq, pipeline, tokenizer, bert_model)
-                    progress.progress(100, text="Done!")
-                    progress.empty()
+                pc_names   = [f"PC{i+1}" for i in range(X_pca.shape[1])]
+                df_pc      = pd.DataFrame(X_pca, columns=pc_names)
 
-                    # Result display
-                    st.markdown("---")
-                    r1, r2 = st.columns(2, gap="large")
+                progress.progress(80, text="Running SVM classifier...")
+                
+                svm_cols   = pipeline["pc_cols"]
+                for col in svm_cols:
+                    if col not in df_pc.columns:
+                        df_pc[col] = 0.0
 
-                    with r1:
-                        if result["prediction"] == 1:
-                            st.markdown(f"""
-                            <div class='result-patho'>
-                                <div class='result-icon'>⚠️</div>
-                                <div class='result-label' style='color: #ff4d6d;'>
-                                    PATHOGENIC
-                                </div>
-                                <div class='result-conf'>
-                                    Confidence: {result['confidence']*100:.1f}%
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"""
-                            <div class='result-safe'>
-                                <div class='result-icon'>✅</div>
-                                <div class='result-label' style='color: #00d4aa;'>
-                                    NON-PATHOGENIC
-                                </div>
-                                <div class='result-conf'>
-                                    Confidence: {result['confidence']*100:.1f}%
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
+                X_svm      = df_pc[svm_cols].values
+                X_svm_sc   = pipeline["scaler_svm"].transform(X_svm)
 
-                    with r2:
-                        st.markdown("<div class='card'>", unsafe_allow_html=True)
-                        st.markdown("<div class='card-title'>Probability Breakdown</div>",
-                                    unsafe_allow_html=True)
+                # 3. Generate predictions using your SVM model
+                proba      = pipeline["svm"].predict_proba(X_svm_sc)[0]
+                pred       = pipeline["svm"].predict(X_svm_sc)[0]
 
-                        p_val = result["prob_patho"]
-                        n_val = result["prob_nonpatho"]
+                result = {
+                    "prediction":    int(pred),
+                    "label":         "Pathogenic" if pred == 1 else "Non-Pathogenic",
+                    "prob_patho":    float(proba[1]),
+                    "prob_nonpatho": float(proba[0]),
+                    "confidence":    float(max(proba)),
+                }
+                
+                progress.progress(100, text="Done!")
+                progress.empty()
 
+                # Result display (Keep your custom HTML formatting completely intact)
+                st.markdown("---")
+                r1, r2 = st.columns(2, gap="large")
+
+                with r1:
+                    if result["prediction"] == 1:
                         st.markdown(f"""
-                        <div style='margin-bottom: 12px;'>
-                            <div style='display: flex; justify-content: space-between;
-                                        font-size: 0.85rem; margin-bottom: 6px;'>
-                                <span style='color: #ff4d6d;'>Pathogenic</span>
-                                <span style='font-family: Space Mono;
-                                             color: #ff4d6d;'>{p_val*100:.1f}%</span>
+                        <div class='result-patho'>
+                            <div class='result-icon'>⚠️</div>
+                            <div class='result-label' style='color: #ff4d6d;'>
+                                PATHOGENIC
                             </div>
-                            <div style='background: #1a2236; border-radius: 4px;
-                                        height: 8px; overflow: hidden;'>
-                                <div style='background: #ff4d6d; width: {p_val*100:.1f}%;
-                                            height: 100%; border-radius: 4px;'></div>
+                            <div class='result-conf'>
+                                Confidence: {result['confidence']*100:.1f}%
                             </div>
                         </div>
-                        <div>
-                            <div style='display: flex; justify-content: space-between;
-                                        font-size: 0.85rem; margin-bottom: 6px;'>
-                                <span style='color: #00d4aa;'>Non-Pathogenic</span>
-                                <span style='font-family: Space Mono;
-                                             color: #00d4aa;'>{n_val*100:.1f}%</span>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"""
+                        <div class='result-safe'>
+                            <div class='result-icon'>✅</div>
+                            <div class='result-label' style='color: #00d4aa;'>
+                                NON-PATHOGENIC
                             </div>
-                            <div style='background: #1a2236; border-radius: 4px;
-                                        height: 8px; overflow: hidden;'>
-                                <div style='background: #00d4aa; width: {n_val*100:.1f}%;
-                                            height: 100%; border-radius: 4px;'></div>
+                            <div class='result-conf'>
+                                Confidence: {result['confidence']*100:.1f}%
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
 
-                        st.markdown(f"""
-                        <div style='margin-top: 20px; padding-top: 16px;
-                                    border-top: 1px solid #1e2d45;'>
-                            <div style='font-size: 0.78rem; color: #64748b;
-                                        font-family: Space Mono; letter-spacing: 1px;'>
-                                SEQUENCE LENGTH
-                            </div>
-                            <div style='font-size: 1.1rem; color: #e2e8f0;
-                                        font-family: Space Mono; margin-top: 4px;'>
-                                {len(seq)} aa
-                                {'(truncated to 510)' if len(seq) > 510 else ''}
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        st.markdown("</div>", unsafe_allow_html=True)
+                with r2:
+                    st.markdown("<div class='card'>", unsafe_allow_html=True)
+                    st.markdown("<div class='card-title'>Probability Breakdown</div>", unsafe_allow_html=True)
 
-                except Exception as e:
-                    progress.empty()
-                    st.error(f"Prediction failed: {str(e)}")
-                    st.markdown("""
-                    <div class='warn-box'>
-                        This may be due to a mismatch between the sequence features
-                        and the trained pipeline. Make sure all .pkl files were
-                        generated from the same dataset.
+                    p_val = result["prob_patho"]
+                    n_val = result["prob_nonpatho"]
+
+                    st.markdown(f"""
+                    <div style='margin-bottom: 12px;'>
+                        <div style='display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 6px;'>
+                            <span style='color: #ff4d6d;'>Pathogenic</span>
+                            <span style='font-family: Space Mono; color: #ff4d6d;'>{p_val*100:.1f}%</span>
+                        </div>
+                        <div style='background: #1a2236; border-radius: 4px; height: 8px; overflow: hidden;'>
+                            <div style='background: #ff4d6d; width: {p_val*100:.1f}%; height: 100%; border-radius: 4px;'></div>
+                        </div>
+                    </div>
+                    <div>
+                        <div style='display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 6px;'>
+                            <span style='color: #00d4aa;'>Non-Pathogenic</span>
+                            <span style='font-family: Space Mono; color: #00d4aa;'>{n_val*100:.1f}%</span>
+                        </div>
+                        <div style='background: #1a2236; border-radius: 4px; height: 8px; overflow: hidden;'>
+                            <div style='background: #00d4aa; width: {n_val*100:.1f}%; height: 100%; border-radius: 4px;'></div>
+                        </div>
                     </div>
                     """, unsafe_allow_html=True)
+
+                    st.markdown(f"""
+                    <div style='margin-top: 20px; padding-top: 16px; border-top: 1px solid #1e2d45;'>
+                        <div style='font-size: 0.78rem; color: #64748b; font-family: Space Mono; letter-spacing: 1px;'>
+                            SEQUENCE LENGTH
+                        </div>
+                        <div style='font-size: 1.1rem; color: #e2e8f0; font-family: Space Mono; margin-top: 4px;'>
+                            {len(seq)} aa
+                            {'(truncated to 510)' if len(seq) > 510 else ''}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+            except Exception as e:
+                if 'progress' in locals():
+                    progress.empty()
+                st.error(f"Prediction failed: {str(e)}")
+                st.markdown("""
+                <div class='warn-box'>
+                    This may be due to a network error with the Hugging Face API or a mismatch between the sequence features and the trained pipeline.
+                </div>
+                """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────
 # PAGE: MODEL INFO
