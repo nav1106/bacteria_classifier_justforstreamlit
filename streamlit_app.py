@@ -312,6 +312,26 @@ st.markdown("""
 @st.cache_resource
 def load_pipeline():
     """Load all saved pipeline objects."""
+    # List of files we want to test load individually
+    pkl_files = [
+        "correlation_cols_to_keep.pkl", "scaler_pca.pkl", "pca.pkl", 
+        "feature_cols_pca.pkl", "boruta_selected_cols.pkl", "scaler_rfe.pkl", 
+        "rfecv.pkl", "rfe_selected_cols.pkl", "scaler_selectk.pkl", 
+        "selector_selectk.pkl", "selected_features_selectk.pkl", "scaler_enet.pkl", 
+        "elasticnet.pkl", "elasticnet_selected_features.pkl", "scaler_svm.pkl", 
+        "svm_model.pkl", "feature_cols_svm.pkl"
+    ]
+    
+    # Test load each one sequentially to catch the exact culprit
+    for file in pkl_files:
+        try:
+            joblib.load(file)
+        except Exception as e:
+            st.error(f"❌ Failed to load file: {file}")
+            st.exception(e)
+            st.stop()
+
+    # If they all pass, load the full dict normally:
     try:
         pipeline = {
             "corr_cols":        joblib.load("correlation_cols_to_keep.pkl"),
@@ -333,7 +353,7 @@ def load_pipeline():
             "pc_cols":          joblib.load("feature_cols_svm.pkl"),
         }
         return pipeline, None
-    except FileNotFoundError as e:
+    except Exception as e:
         return None, str(e)
 
 @st.cache_resource
