@@ -366,9 +366,11 @@ VALID_AAS = set("ACDEFGHIKLMNPQRSTVWYBXZUO")
 def get_proteinbert_embedding(sequence):
     """
     Convert a protein sequence to a 1024-dim ProteinBERT embedding
-    using Hugging Face Serverless API + original attention mask pooling logic.
+    using Hugging Face Serverless Inference Providers API.
     """
-    API_URL = "https://api-inference.huggingface.co/models/Rostlab/prot_bert"
+    # ── UPDATE THE API URL HERE ──────────────────────────────────────────────
+    # Hugging Face routed their legacy serverless endpoints here
+    API_URL = "https://router.huggingface.co/hf-inference/models/Rostlab/prot_bert"
     
     # 1. Fetch token from Streamlit secrets
     headers = {}
@@ -377,14 +379,13 @@ def get_proteinbert_embedding(sequence):
     else:
         raise RuntimeError("HF_TOKEN missing from Streamlit secrets.")
 
-    # 2. Replicate your exact sequence preparation logic
+    # 2. Replicate sequence preparation logic
     seq = str(sequence).upper().strip()
     seq = "".join(aa if aa in VALID_AAS else "X" for aa in seq)
-    seq = seq[:510]  # Cap at 510 to allow for special tokens
+    seq = seq[:510]  
     seq_spaced = " ".join(list(seq))
 
-    # 3. Request raw token embeddings from Hugging Face
-    # 'wait_for_model=True' tells HF to wait and wake up the model if it's asleep
+    # 3. Request raw token embeddings
     payload = {
         "inputs": seq_spaced,
         "options": {"wait_for_model": True}
@@ -395,27 +396,22 @@ def get_proteinbert_embedding(sequence):
     if response.status_code == 200:
         res_json = response.json()
         
-        # The API returns a 3D list matching your original shape: [batch_size, sequence_length, hidden_dim]
-        # For a single string input, it looks like: [[ [tok1_1024], [tok2_1024], ... ]]
         if isinstance(res_json, list) and len(res_json) > 0:
             token_embeddings = np.array(res_json[0]) # shape: (num_tokens, 1024)
             
-            # 4. Replicate your precise attention mask math:
-            # The API automatically adds [CLS] and [SEP] tokens around your input, 
-            # and returns embeddings for all valid tokens (no padding tokens for a single input sequence).
-            # Therefore, our mask is simply 1 for every token returned.
+            # Replicate your exact attention mask pooling math
             num_tokens = token_embeddings.shape[0]
-            mask_exp = np.ones((num_tokens, 1)) # shape: (num_tokens, 1)
+            mask_exp = np.ones((num_tokens, 1)) 
             
-            sum_e = np.sum(token_embeddings * mask_exp, axis=0) # Sum across tokens -> (1024,)
-            sum_m = np.maximum(np.sum(mask_exp, axis=0), 1e-9)   # Count tokens -> (1,)
+            sum_e = np.sum(token_embeddings * mask_exp, axis=0) 
+            sum_m = np.maximum(np.sum(mask_exp, axis=0), 1e-9)   
             
             embedding = sum_e / sum_m
             return embedding
             
         raise ValueError("Unexpected response format from Hugging Face API.")
     elif response.status_code == 503:
-        raise RuntimeError("The model is still loading on Hugging Face's servers. Please wait 20 seconds and click Predict again!")
+        raise RuntimeError("The model is currently waking up on Hugging Face's servers. Please wait 20 seconds and click Predict again!")
     else:
         raise RuntimeError(f"HF API Error ({response.status_code}): {response.text}")
 # ─────────────────────────────────────────────────────────────────
