@@ -1,9 +1,7 @@
 streamlit
-torch
-transformers
 joblib
 pandas
 numpy
 scikit-learn
-boruta
 scipy
+requests
