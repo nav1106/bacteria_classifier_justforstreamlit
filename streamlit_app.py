@@ -545,7 +545,6 @@ if "Predict" in page:
             Classify bacterial proteins as Pathogenic or Non-Pathogenic
             using ProteinBERT embeddings and SVM
         </p>
-        <span class='hero-tag'>AMRITA VISHWA VIDYAPEETHAM · CS WITH AI</span>
     </div>
     """, unsafe_allow_html=True)
 
