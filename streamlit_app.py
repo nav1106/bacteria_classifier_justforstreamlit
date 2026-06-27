@@ -362,8 +362,12 @@ def load_proteinbert_low_ram():
     """Load Tokenizer and Model in Float16 to cut RAM footprint below 1GB."""
     try:
         tokenizer = BertTokenizer.from_pretrained("Rostlab/prot_bert", do_lower_case=False)
-        # Using torch_dtype=torch.float16 cuts memory overhead in half (~800MB)
-        model = BertModel.from_pretrained("Rostlab/prot_bert", torch_dtype=torch.float16)
+        # Slices memory overhead perfectly in half (~800MB) and loads efficiently
+        model = BertModel.from_pretrained(
+            "Rostlab/prot_bert", 
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True
+        )
         model.eval()
         return tokenizer, model, None
     except Exception as e:
