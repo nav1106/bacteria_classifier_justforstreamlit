@@ -929,7 +929,6 @@ elif "About" in page:
             Classification of Pathogenic and Non-Pathogenic Bacteria
             Using Protein Sequence Data
         </p>
-        <span class='hero-tag'>AMRITA VISHWA VIDYAPEETHAM · CS WITH AI</span>
     </div>
     """, unsafe_allow_html=True)
 
