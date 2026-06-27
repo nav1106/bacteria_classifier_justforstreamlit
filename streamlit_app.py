@@ -356,86 +356,66 @@ def load_pipeline():
         return pipeline, None
     except Exception as e:
         return None, str(e)
-'''
-@st.cache_resource
-def load_proteinbert():
-    """Load ProteinBERT tokenizer and model."""
-    try:
-        tokenizer = BertTokenizer.from_pretrained(
-            "Rostlab/prot_bert", do_lower_case=False
-        )
-        model = BertModel.from_pretrained("Rostlab/prot_bert")
-        model.eval()
-        return tokenizer, model, None
-    except Exception as e:
-        return None, None, str(e)
-'''
+
 # ─────────────────────────────────────────────────────────────────
 # EMBEDDING FUNCTION
 # ─────────────────────────────────────────────────────────────────
 
 VALID_AAS = set("ACDEFGHIKLMNPQRSTVWYBXZUO")
-'''
-def get_proteinbert_embedding(sequence, tokenizer, model):
-    """Convert a protein sequence to a 1024-dim ProteinBERT embedding."""
-    seq   = str(sequence).upper().strip()
-    seq   = "".join(aa if aa in VALID_AAS else "X" for aa in seq)
-    seq   = seq[:510]
-    seq   = " ".join(list(seq))
 
-    encoded = tokenizer(
-        seq,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=512,
-    )
-
-    with torch.no_grad():
-        output = model(**encoded)
-
-    mask     = encoded["attention_mask"]
-    token_e  = output.last_hidden_state
-    mask_exp = mask.unsqueeze(-1).expand(token_e.size()).float()
-    sum_e    = torch.sum(token_e * mask_exp, dim=1)
-    sum_m    = torch.clamp(mask_exp.sum(dim=1), min=1e-9)
-    embedding = (sum_e / sum_m).squeeze().numpy()
-    return embedding
-'''
-def get_proteinbert_embedding(sequence, hf_token=None):
-    """Fetches the 1024-dim ProtBERT embedding using Hugging Face Serverless API."""
+def get_proteinbert_embedding(sequence):
+    """
+    Convert a protein sequence to a 1024-dim ProteinBERT embedding
+    using Hugging Face Serverless API + original attention mask pooling logic.
+    """
     API_URL = "https://api-inference.huggingface.co/models/Rostlab/prot_bert"
     
-    # Use the token from your Streamlit secrets
+    # 1. Fetch token from Streamlit secrets
     headers = {}
     if "HF_TOKEN" in st.secrets:
         headers["Authorization"] = f"Bearer {st.secrets['HF_TOKEN']}"
-    elif hf_token:
-        headers["Authorization"] = f"Bearer {hf_token}"
+    else:
+        raise RuntimeError("HF_TOKEN missing from Streamlit secrets.")
 
-    # ProtBERT expects spaces between amino acids
+    # 2. Replicate your exact sequence preparation logic
     seq = str(sequence).upper().strip()
     seq = "".join(aa if aa in VALID_AAS else "X" for aa in seq)
-    seq = seq[:510]
+    seq = seq[:510]  # Cap at 510 to allow for special tokens
     seq_spaced = " ".join(list(seq))
 
-    response = requests.post(API_URL, headers=headers, json={"inputs": seq_spaced})
+    # 3. Request raw token embeddings from Hugging Face
+    # 'wait_for_model=True' tells HF to wait and wake up the model if it's asleep
+    payload = {
+        "inputs": seq_spaced,
+        "options": {"wait_for_model": True}
+    }
+    
+    response = requests.post(API_URL, headers=headers, json=payload)
     
     if response.status_code == 200:
-        # The inference API returns token embeddings. 
-        # We perform mean pooling across tokens manually on the returned JSON list.
-        token_embeddings = response.json()
-        if isinstance(token_embeddings, list) and len(token_embeddings) > 0:
-            # If it returns a 3D matrix (batch, tokens, hidden_dim)
-            if isinstance(token_embeddings[0], list) and isinstance(token_embeddings[0][0], list):
-                matrix = np.array(token_embeddings[0]) # shape: (tokens, 1024)
-                return np.mean(matrix, axis=0) # mean pool to (1024,)
-            # If it already returns a 2D matrix
-            elif isinstance(token_embeddings[0], list):
-                return np.mean(np.array(token_embeddings), axis=0)
+        res_json = response.json()
+        
+        # The API returns a 3D list matching your original shape: [batch_size, sequence_length, hidden_dim]
+        # For a single string input, it looks like: [[ [tok1_1024], [tok2_1024], ... ]]
+        if isinstance(res_json, list) and len(res_json) > 0:
+            token_embeddings = np.array(res_json[0]) # shape: (num_tokens, 1024)
+            
+            # 4. Replicate your precise attention mask math:
+            # The API automatically adds [CLS] and [SEP] tokens around your input, 
+            # and returns embeddings for all valid tokens (no padding tokens for a single input sequence).
+            # Therefore, our mask is simply 1 for every token returned.
+            num_tokens = token_embeddings.shape[0]
+            mask_exp = np.ones((num_tokens, 1)) # shape: (num_tokens, 1)
+            
+            sum_e = np.sum(token_embeddings * mask_exp, axis=0) # Sum across tokens -> (1024,)
+            sum_m = np.maximum(np.sum(mask_exp, axis=0), 1e-9)   # Count tokens -> (1,)
+            
+            embedding = sum_e / sum_m
+            return embedding
+            
         raise ValueError("Unexpected response format from Hugging Face API.")
     elif response.status_code == 503:
-        raise RuntimeError("Hugging Face model is currently loading on their servers. Please wait 20 seconds and try again!")
+        raise RuntimeError("The model is still loading on Hugging Face's servers. Please wait 20 seconds and click Predict again!")
     else:
         raise RuntimeError(f"HF API Error ({response.status_code}): {response.text}")
 # ─────────────────────────────────────────────────────────────────
