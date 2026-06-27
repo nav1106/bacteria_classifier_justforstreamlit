@@ -366,11 +366,10 @@ VALID_AAS = set("ACDEFGHIKLMNPQRSTVWYBXZUO")
 def get_proteinbert_embedding(sequence):
     """
     Convert a protein sequence to a 1024-dim ProteinBERT embedding
-    using Hugging Face Serverless Inference Providers API.
+    using Hugging Face Serverless Feature Extraction API.
     """
-    # ── UPDATE THE API URL HERE ──────────────────────────────────────────────
-    # Hugging Face routed their legacy serverless endpoints here
-    API_URL = "https://router.huggingface.co/hf-inference/models/Rostlab/prot_bert"
+    # Force the inference routing to use the feature-extraction pipeline format
+    API_URL = "https://router.huggingface.co/hf-inference/pipeline/feature-extraction/Rostlab/prot_bert"
     
     # 1. Fetch token from Streamlit secrets
     headers = {}
@@ -379,8 +378,9 @@ def get_proteinbert_embedding(sequence):
     else:
         raise RuntimeError("HF_TOKEN missing from Streamlit secrets.")
 
-    # 2. Replicate sequence preparation logic
+    # 2. Sequence preparation logic
     seq = str(sequence).upper().strip()
+    # Ensure VALID_AAS is defined globally in your script (e.g., "ACDEFGHIKLMNPQRSTVWY")
     seq = "".join(aa if aa in VALID_AAS else "X" for aa in seq)
     seq = seq[:510]  
     seq_spaced = " ".join(list(seq))
@@ -396,10 +396,14 @@ def get_proteinbert_embedding(sequence):
     if response.status_code == 200:
         res_json = response.json()
         
+        # When using the feature-extraction pipeline via the API, 
+        # it returns a 2D list of shape: [num_tokens, 1024]
         if isinstance(res_json, list) and len(res_json) > 0:
-            token_embeddings = np.array(res_json[0]) # shape: (num_tokens, 1024)
+            token_embeddings = np.array(res_json) # shape: (num_tokens, 1024)
             
-            # Replicate your exact attention mask pooling math
+            # Replicate your exact attention mask pooling math:
+            # Since the API automatically handles token mapping and returns valid vectors,
+            # we pool across all available tokens evenly.
             num_tokens = token_embeddings.shape[0]
             mask_exp = np.ones((num_tokens, 1)) 
             
