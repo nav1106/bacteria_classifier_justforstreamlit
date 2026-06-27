@@ -16,8 +16,8 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import joblib
-import torch
-from transformers import BertTokenizer, BertModel
+#import torch
+#from transformers import BertTokenizer, BertModel
 import warnings
 warnings.filterwarnings("ignore")
 import requests
