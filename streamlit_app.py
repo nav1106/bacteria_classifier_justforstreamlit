@@ -366,10 +366,10 @@ VALID_AAS = set("ACDEFGHIKLMNPQRSTVWYBXZUO")
 def get_proteinbert_embedding(sequence):
     """
     Convert a protein sequence to a 1024-dim ProteinBERT embedding
-    using Hugging Face Serverless Feature Extraction API.
+    using the base Hugging Face Serverless Inference API.
     """
-    # Force the inference routing to use the feature-extraction pipeline format
-    API_URL = "https://router.huggingface.co/hf-inference/pipeline/feature-extraction/Rostlab/prot_bert"
+    # Use the core base inference URL directly
+    API_URL = "https://router.huggingface.co/hf-inference/models/Rostlab/prot_bert"
     
     # 1. Fetch token from Streamlit secrets
     headers = {}
@@ -380,12 +380,11 @@ def get_proteinbert_embedding(sequence):
 
     # 2. Sequence preparation logic
     seq = str(sequence).upper().strip()
-    # Ensure VALID_AAS is defined globally in your script (e.g., "ACDEFGHIKLMNPQRSTVWY")
     seq = "".join(aa if aa in VALID_AAS else "X" for aa in seq)
     seq = seq[:510]  
     seq_spaced = " ".join(list(seq))
 
-    # 3. Request raw token embeddings
+    # 3. Request raw layer configurations
     payload = {
         "inputs": seq_spaced,
         "options": {"wait_for_model": True}
@@ -396,26 +395,27 @@ def get_proteinbert_embedding(sequence):
     if response.status_code == 200:
         res_json = response.json()
         
-        # When using the feature-extraction pipeline via the API, 
-        # it returns a 2D list of shape: [num_tokens, 1024]
+        # When querying the core model directly, the API returns a 3D matrix 
+        # inside an outer array: [[ [tok1_features], [tok2_features], ... ]]
         if isinstance(res_json, list) and len(res_json) > 0:
-            token_embeddings = np.array(res_json) # shape: (num_tokens, 1024)
-            
-            # Replicate your exact attention mask pooling math:
-            # Since the API automatically handles token mapping and returns valid vectors,
-            # we pool across all available tokens evenly.
-            num_tokens = token_embeddings.shape[0]
-            mask_exp = np.ones((num_tokens, 1)) 
-            
-            sum_e = np.sum(token_embeddings * mask_exp, axis=0) 
-            sum_m = np.maximum(np.sum(mask_exp, axis=0), 1e-9)   
-            
-            embedding = sum_e / sum_m
-            return embedding
+            # Unwrap the nested list layer to get token distributions
+            raw_embeddings = res_json[0]
+            if isinstance(raw_embeddings, list) and len(raw_embeddings) > 0:
+                token_embeddings = np.array(raw_embeddings) # shape: (num_tokens, 1024)
+                
+                # Replicate your exact uniform attention pooling math across tokens
+                num_tokens = token_embeddings.shape[0]
+                mask_exp = np.ones((num_tokens, 1)) 
+                
+                sum_e = np.sum(token_embeddings * mask_exp, axis=0) 
+                sum_m = np.maximum(np.sum(mask_exp, axis=0), 1e-9)   
+                
+                embedding = sum_e / sum_m
+                return embedding
             
         raise ValueError("Unexpected response format from Hugging Face API.")
     elif response.status_code == 503:
-        raise RuntimeError("The model is currently waking up on Hugging Face's servers. Please wait 20 seconds and click Predict again!")
+        raise RuntimeError("The model is still initializing on Hugging Face infrastructure. Please wait 20 seconds and click Predict again!")
     else:
         raise RuntimeError(f"HF API Error ({response.status_code}): {response.text}")
 # ─────────────────────────────────────────────────────────────────
